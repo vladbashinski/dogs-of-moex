@@ -8,7 +8,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-from data_loader import load_index_data, get_benchmark_returns, get_risk_free_rates
 from backtester import run_backtest, StrategyParams
 
 st.set_page_config(
