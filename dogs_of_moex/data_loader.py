@@ -1,135 +1,229 @@
 """
-data_loader.py — загрузка данных из Excel и MOEX ISS API.
+app.py — Streamlit-интерфейс бэктестера «Собаки Доу» на MOEX.
+Совместим с backtester.py v2 (StrategyParams dataclass).
 """
 
-import json
-import os
-from pathlib import Path
-
+import streamlit as st
 import pandas as pd
-import requests
+import numpy as np
+import plotly.graph_objects as go
 
-DATA_DIR = Path(__file__).parent / "data"
-CACHE_FILE = DATA_DIR / "benchmark_cache.json"
-EXCEL_FILE = DATA_DIR / "Дивиденды_с_2019_MOEX.xlsx"
+from data_loader import load_index_data, get_benchmark_returns, get_risk_free_rates
+from backtester import run_backtest, StrategyParams
 
-# ──────────────────────────────────────────────────────────────
-# Безрисковые ставки (ключевая ставка ЦБ, средняя за год) — для Sharpe
-# ──────────────────────────────────────────────────────────────
-RISK_FREE_RATES = {
-    2001: 0.250, 2002: 0.210, 2003: 0.160, 2004: 0.130, 2005: 0.130,
-    2006: 0.110, 2007: 0.100, 2008: 0.130, 2009: 0.090, 2010: 0.080,
-    2011: 0.080, 2012: 0.080, 2013: 0.080, 2014: 0.095, 2015: 0.150,
-    2016: 0.105, 2017: 0.090, 2018: 0.075, 2019: 0.070, 2020: 0.045,
-    2021: 0.060, 2022: 0.110, 2023: 0.160, 2024: 0.165, 2025: 0.210,
+st.set_page_config(
+    page_title="Собаки MOEX",
+    page_icon="🐕",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown("""
+<style>
+.metric-card {
+    background: #1e2130; border-radius: 12px;
+    padding: 16px 20px; text-align: center;
 }
+.metric-label { color: #9ca3af; font-size: 13px; margin-bottom: 4px; }
+.metric-value { font-size: 26px; font-weight: 700; }
+.positive { color: #34d399; }
+.negative { color: #f87171; }
+.neutral  { color: #93c5fd; }
+</style>
+""", unsafe_allow_html=True)
 
+with st.sidebar:
+    st.title("⚙️ Параметры")
 
-def load_index_data() -> pd.DataFrame:
-    """
-    Читает лист «Индекс с Дивидендами».
+    st.subheader("🐕 Стратегия")
+    n_dogs = st.slider("Количество «собак»", 3, 15, 10,
+                        help="Топ-N акций по дивдоходности предыдущего года")
+    low5_mode = st.checkbox("Режим «Щенки» (Low-5)",
+                             help="Из топ-N выбираем 5 самых дешёвых по цене")
 
-    Возвращает DataFrame:
-        year, ticker, price, weight, dividend, div_yield
-    """
-    df = pd.read_excel(EXCEL_FILE, sheet_name="Индекс с Дивидендами")
-    df = df.rename(columns={
-        "Год":                   "year",
-        "Код инструмента":       "ticker",
-        "Цена, RUB":             "price",
-        "Вес, %":                "weight",
-        "Dividend":              "dividend",
-        "Див. Доходность":       "div_yield",
-    })
-    for col in ("div_yield", "dividend", "price", "weight"):
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    st.subheader("📅 Период")
+    start_year = st.selectbox("Начало", [2019, 2020, 2021, 2022], index=0)
+    end_year   = st.selectbox("Конец",  [2022, 2023, 2024],       index=2)
+    if end_year <= start_year:
+        st.error("Конец должен быть позже начала")
+        st.stop()
 
-    df["year"]   = df["year"].astype(int)
-    df["ticker"] = df["ticker"].astype(str).str.strip()
-    return df[["year", "ticker", "price", "weight", "dividend", "div_yield"]].copy()
+    st.subheader("🔍 Фильтры")
+    min_yield  = st.slider("Мин. дивдоходность, %", 0, 30, 1) / 100
+    max_yield  = st.slider("Макс. дивдоходность, %", 10, 100, 99) / 100
+    min_weight = st.slider("Мин. вес в индексе, %", 0.0, 5.0, 0.0, 0.1) / 100
+    commission = st.slider("Комиссия (одна сторона), %", 0.0, 1.0, 0.1, 0.05) / 100
 
-
-# ──────────────────────────────────────────────────────────────
-# MOEX ISS — годовые доходности индекса
-# ──────────────────────────────────────────────────────────────
-
-def _fetch_index_from_moex(ticker: str, start_year: int, end_year: int) -> dict[int, float]:
-    """Скачивает дневные свечи индекса и возвращает словарь {year: return}."""
-    url = (
-        f"https://iss.moex.com/iss/history/engines/stock/"
-        f"markets/index/securities/{ticker}.json"
+    st.subheader("💰 Капитал")
+    initial_capital = st.number_input(
+        "Начальный капитал, ₽",
+        min_value=100_000, max_value=100_000_000,
+        value=1_000_000, step=100_000, format="%d",
     )
-    all_rows: list[dict] = []
-    start = 0
-    while True:
-        params = {
-            "from":     f"{start_year}-01-02",
-            "till":     f"{end_year}-12-31",
-            "interval": 1,
-            "start":    start,
-        }
-        try:
-            resp = requests.get(url, params=params, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-            cols = data["history"]["columns"]
-            rows = data["history"]["data"]
-        except Exception:
-            break
-        if not rows:
-            break
-        all_rows.extend([dict(zip(cols, r)) for r in rows])
-        start += len(rows)
-        if len(rows) < 100:
-            break
 
-    if not all_rows:
-        return {}
+@st.cache_data(show_spinner="Загружаем данные…")
+def load_data():
+    return load_index_data()
 
-    df = pd.DataFrame(all_rows)
-    df["TRADEDATE"] = pd.to_datetime(df["TRADEDATE"])
-    df["year"]  = df["TRADEDATE"].dt.year
-    df["CLOSE"] = pd.to_numeric(df["CLOSE"], errors="coerce")
+@st.cache_data(show_spinner="Загружаем бенчмарк IMOEX…")
+def load_benchmark(start_year, end_year):
+    returns = get_benchmark_returns(start_year - 1, end_year + 1)
+    if returns.empty:
+        return None
+    return returns
 
-    annual: dict[int, float] = {}
-    for year, grp in df.groupby("year"):
-        grp = grp.sort_values("TRADEDATE").dropna(subset=["CLOSE"])
-        if len(grp) < 5:
-            continue
-        p_open  = grp["CLOSE"].iloc[0]
-        p_close = grp["CLOSE"].iloc[-1]
-        if p_open > 0:
-            annual[int(year)] = round(p_close / p_open - 1, 6)
-    return annual
+df_index = load_data()
 
+@st.cache_data(show_spinner="Считаем бэктест…")
+def cached_backtest(n_dogs, start_year, end_year, min_yield, max_yield,
+                    min_weight, commission, low5_mode):
+    params = StrategyParams(
+        start_year       = start_year,
+        end_year         = end_year,
+        n_dogs           = n_dogs,
+        commission       = commission,
+        min_div_yield    = min_yield,
+        max_div_yield    = max_yield,
+        min_index_weight = min_weight,
+        low5_mode        = low5_mode,
+        low5_n_first     = n_dogs,
+    )
+    bench_returns = load_benchmark(start_year, end_year)
+    rfr = get_risk_free_rates()
+    return run_backtest(df_index, params, benchmark_returns=bench_returns, risk_free_rates=rfr)
 
-def get_benchmark_returns(start_year: int = 2001, end_year: int = 2025) -> pd.Series:
-    """
-    Годовые доходности IMOEX (кэшируются в data/benchmark_cache.json).
-    При первом запросе обращается к MOEX ISS API.
-    """
-    cache: dict = {}
-    if CACHE_FILE.exists():
-        with open(CACHE_FILE) as f:
-            cache = json.load(f)
+result = cached_backtest(n_dogs, start_year, end_year, min_yield, max_yield,
+                         min_weight, commission, low5_mode)
 
-    key = f"imoex_{start_year}_{end_year}"
-    if key not in cache:
-        returns = _fetch_index_from_moex("IMOEX", start_year, end_year)
-        if returns:
-            cache[key] = returns
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            with open(CACHE_FILE, "w") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
+if not result.annual:
+    st.warning("Нет данных для выбранных параметров. Измените фильтры.")
+    st.stop()
 
-    raw = cache.get(key, {})
-    return pd.Series({int(k): v for k, v in raw.items()}).sort_index()
+m = result.metrics
 
+st.title("🐕 Собаки Доу — MOEX")
+st.caption(
+    "Стратегия: каждый год покупаем N акций из индекса MOEX с наибольшей "
+    "дивидендной доходностью, держим год, ребалансируемся. "
+    "Бенчмарк — IMOEX (индекс Московской Биржи)."
+)
+st.divider()
 
-def clear_benchmark_cache() -> None:
-    """Удаляет кэш — полезно для обновления данных."""
-    if CACHE_FILE.exists():
-        os.remove(CACHE_FILE)
+def card(label, value, suffix="", css="neutral"):
+    st.markdown(f"""
+    <div class="metric-card">
+      <div class="metric-label">{label}</div>
+      <div class="metric-value {css}">{value}{suffix}</div>
+    </div>""", unsafe_allow_html=True)
 
-def get_risk_free_rates() -> dict:
-    return RISK_FREE_RATES
+def color(v): return "positive" if v >= 0 else "negative"
+
+final_capital = initial_capital * result.equity_curve.iloc[-1]
+
+c1,c2,c3,c4,c5,c6 = st.columns(6)
+with c1: card("Итоговый капитал", f"₽{final_capital:,.0f}")
+with c2: card("Полная доходность", f"{m['total_return']*100:.1f}", "%", color(m['total_return']))
+with c3: card("CAGR", f"{m['cagr']*100:.1f}", "%", color(m['cagr']))
+with c4: card("Sharpe", f"{m['sharpe']:.2f}", "", "positive" if m['sharpe']>0.5 else "neutral")
+with c5: card("Макс. просадка", f"−{abs(m['max_drawdown'])*100:.1f}", "%", "negative")
+with c6: card("Лучший год", f"{m['best_year']*100:.1f}", "%", "positive")
+
+st.divider()
+
+left, right = st.columns([2, 1])
+
+with left:
+    st.subheader("Кривая капитала")
+    eq = result.equity_curve * initial_capital
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=eq.index, y=eq.values,
+        name=f"Собаки ({n_dogs} акций)",
+        line=dict(color="#34d399", width=2.5),
+        fill="tozeroy", fillcolor="rgba(52,211,153,0.07)",
+    ))
+    if result.benchmark_curve is not None:
+        bench = result.benchmark_curve * initial_capital
+        common_idx = [i for i in bench.index if i in eq.index]
+        bench = bench[common_idx]
+        fig.add_trace(go.Scatter(
+            x=bench.index, y=bench.values,
+            name="IMOEX",
+            line=dict(color="#93c5fd", width=2, dash="dash"),
+        ))
+    fig.update_layout(
+        template="plotly_dark", height=340,
+        margin=dict(l=10,r=10,t=10,b=10),
+        legend=dict(orientation="h", y=1.08),
+        xaxis=dict(dtick=1),
+        yaxis=dict(title="₽", tickformat=",.0f"),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+with right:
+    st.subheader("Доходность по годам")
+    years_list = [r.year for r in result.annual]
+    rets  = [r.portfolio_return * 100 for r in result.annual]
+    colors_bar = ["#34d399" if r >= 0 else "#f87171" for r in rets]
+    fig2 = go.Figure(go.Bar(
+        x=years_list, y=rets, marker_color=colors_bar,
+        text=[f"{r:+.1f}%" for r in rets], textposition="outside",
+    ))
+    fig2.add_hline(y=0, line_dash="dot", line_color="gray")
+    fig2.update_layout(
+        template="plotly_dark", height=340,
+        margin=dict(l=10,r=10,t=10,b=10),
+        xaxis=dict(dtick=1), yaxis=dict(title="%"),
+        showlegend=False,
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+st.divider()
+st.subheader("📋 Состав портфелей по годам")
+
+for yr in result.annual:
+    label = (
+        f"**{yr.year}** — "
+        f"Итого: {yr.portfolio_return*100:+.1f}%  |  "
+        f"Цена: {yr.price_return*100:+.1f}%  |  "
+        f"Дивиденды: {yr.div_return*100:+.1f}%  |  "
+        f"Акций: {yr.n_stocks}"
+    )
+    with st.expander(label):
+        df_show = yr.stocks.copy()
+        df_show.columns = ["Тикер", "Цена покупки", "Цена продажи",
+                           "Дивдоходность", "Рост цены", "Итого"]
+        for col in ["Дивдоходность", "Рост цены", "Итого"]:
+            df_show[col] = df_show[col] * 100
+        styled = df_show.style.format({
+            "Цена покупки":  "{:.2f} ₽",
+            "Цена продажи":  "{:.2f} ₽",
+            "Дивдоходность": "{:.1f}%",
+            "Рост цены":     "{:+.1f}%",
+            "Итого":         "{:+.1f}%",
+        }).background_gradient(subset=["Итого"], cmap="RdYlGn", vmin=-50, vmax=100)
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+st.divider()
+st.subheader("📊 Сводные метрики")
+metrics_df = pd.DataFrame([
+    {"Метрика": "Полная доходность",      "Значение": f"{m['total_return']*100:.1f}%"},
+    {"Метрика": "CAGR",                   "Значение": f"{m['cagr']*100:.1f}%"},
+    {"Метрика": "Волатильность (σ)",      "Значение": f"{m['volatility']*100:.1f}%"},
+    {"Метрика": "Sharpe",                 "Значение": f"{m['sharpe']:.2f}"},
+    {"Метрика": "Sortino",                "Значение": f"{m['sortino']:.2f}"},
+    {"Метрика": "Max Drawdown",           "Значение": f"{m['max_drawdown']*100:.1f}%"},
+    {"Метрика": "Win Rate",               "Значение": f"{m['win_rate']*100:.0f}%"},
+    {"Метрика": "Лучший год",             "Значение": f"{m['best_year']*100:.1f}%"},
+    {"Метрика": "Худший год",             "Значение": f"{m['worst_year']*100:.1f}%"},
+    {"Метрика": "Ср. дивидендный вклад",  "Значение": f"{m['avg_div_contribution']*100:.1f}%"},
+])
+st.dataframe(metrics_df, use_container_width=False, hide_index=True, width=400)
+
+st.divider()
+st.caption(
+    "Данные: IMOEX (состав индекса) + дивиденды. "
+    "Цены = закрытие на конец года. "
+    "Результаты прошлого не гарантируют будущей доходности."
+)
