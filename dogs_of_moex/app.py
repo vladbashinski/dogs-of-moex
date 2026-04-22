@@ -42,7 +42,7 @@ with st.sidebar:
 
     st.subheader("📅 Период")
     start_year = st.selectbox("Начало", [2019, 2020, 2021, 2022], index=0)
-    end_year   = st.selectbox("Конец",  [2022, 2023, 2024],       index=2)
+    end_year = st.selectbox("Конец", [2022, 2023, 2024, 2025], index=3)
     if end_year <= start_year:
         st.error("Конец должен быть позже начала")
         st.stop()
