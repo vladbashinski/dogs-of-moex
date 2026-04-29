@@ -408,10 +408,10 @@ else:
             <div style="background:#1e2130;padding:14px;border-radius:10px;border-left:4px solid {color_dot}">
               <div style="font-weight:700;font-size:15px;margin-bottom:6px;color:{color_dot}">● {name}</div>
               <div style="font-size:12px;color:#9ca3af;line-height:1.4">{desc}</div>
-              <div style="margin-top:10px;font-size:13px">
-                <span style="color:#9ca3af">CAGR:</span> <b>{mr['cagr']*100:.1f}%</b> ·
-                <span style="color:#9ca3af">DD:</span> <b>{mr['max_drawdown']*100:.1f}%</b>
-              </div>
+              <div style="margin-top:10px;font-size:13px;color:#e5e7eb">
+              <span style="color:#9ca3af">CAGR:</span> <b style="color:#34d399">{mr['cagr']*100:.1f}%</b> ·
+              <span style="color:#9ca3af">DD:</span> <b style="color:#f87171">{mr['max_drawdown']*100:.1f}%</b>
+            </div>
             </div>""", unsafe_allow_html=True)
 
     st.divider()
