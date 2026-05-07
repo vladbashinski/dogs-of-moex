@@ -207,18 +207,40 @@ if mode == "🔬 Исследование":
         st.subheader("Доходность по годам")
         years_list = [r.year for r in result.annual]
         rets = [r.portfolio_return * 100 for r in result.annual]
-        fig2 = go.Figure(go.Bar(
-            x=years_list, y=rets,
+
+        fig2 = go.Figure()
+        fig2.add_trace(go.Bar(
+            name="Dogs",
+            x=years_list,
+            y=rets,
             marker_color=["#34d399" if r >= 0 else "#f87171" for r in rets],
             text=[f"{r:+.1f}%" for r in rets],
             textposition="outside",
         ))
+
+        if result.benchmark_curve is not None:
+            bench_rets_by_year = result.benchmark_curve.pct_change().dropna()
+            bench_vals = [
+                round(float(bench_rets_by_year[y]) * 100, 1)
+                if y in bench_rets_by_year.index else None
+                for y in years_list
+            ]
+            fig2.add_trace(go.Bar(
+                name="IMOEX",
+                x=years_list,
+                y=bench_vals,
+                marker_color="#93c5fd",
+                text=[f"{v:+.1f}%" if v is not None else "" for v in bench_vals],
+                textposition="outside",
+            ))
+
         fig2.add_hline(y=0, line_dash="dot", line_color="gray")
         fig2.update_layout(
             template="plotly_dark", height=340,
+            barmode="group",
             margin=dict(l=10, r=10, t=10, b=10),
+            legend=dict(orientation="h", y=1.08),
             xaxis=dict(dtick=1), yaxis=dict(title="%"),
-            showlegend=False,
         )
         st.plotly_chart(fig2, use_container_width=True)
 
