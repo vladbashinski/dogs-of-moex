@@ -137,6 +137,42 @@ def get_benchmark_returns(start_year: int = 2001, end_year: int = 2025) -> pd.Se
         (full_series.index <= end_year)
     ]
 
+def get_benchmark_returns_mcftr(start_year: int = 2001, end_year: int = 2025) -> pd.Series:
+    """
+    Годовые доходности MCFTR (индекс полной доходности, включает дивиденды).
+    Кэшируется отдельно от IMOEX.
+    """
+    cache: dict = {}
+    if CACHE_FILE.exists():
+        with open(CACHE_FILE) as f:
+            cache = json.load(f)
+
+    key = f"mcftr_{_CACHE_START}_{_CACHE_END}"
+
+    if key not in cache:
+        returns = _fetch_index_from_moex("MCFTR", _CACHE_START, _CACHE_END)
+        if returns:
+            cache[key] = returns
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            with open(CACHE_FILE, "w") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+
+    raw = cache.get(key, {})
+    full_series = pd.Series({int(k): v for k, v in raw.items()}).sort_index()
+
+    return full_series[
+        (full_series.index >= start_year) &
+        (full_series.index <= end_year)
+    ]
+
+
+def get_benchmark(ticker: str, start_year: int, end_year: int) -> pd.Series:
+    """
+    Универсальная обёртка. ticker: 'IMOEX' или 'MCFTR'.
+    """
+    if ticker == "MCFTR":
+        return get_benchmark_returns_mcftr(start_year, end_year)
+    return get_benchmark_returns(start_year, end_year)
 
 def clear_benchmark_cache() -> None:
     """Удаляет кэш — использовать для принудительного обновления данных."""

@@ -1,6 +1,7 @@
 """
 app.py — Streamlit-интерфейс бэктестера «Собаки Доу» на MOEX.
 Два режима: Исследование (настройка параметров) и Сравнение (4 фикс. сценария).
+Поддержка двух бенчмарков: IMOEX (ценовой) и MCFTR (полная доходность).
 """
 
 import io
@@ -8,7 +9,9 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-from data_loader import load_index_data, get_benchmark_returns, get_risk_free_rates
+from data_loader import (
+    load_index_data, get_benchmark, get_risk_free_rates
+)
 from backtester import run_backtest, StrategyParams
 
 st.set_page_config(
@@ -32,6 +35,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 # ════════════════════════════════════════════════════════════════
 # ОБЩИЕ ФУНКЦИИ
 # ════════════════════════════════════════════════════════════════
@@ -40,22 +44,11 @@ st.markdown("""
 def load_data():
     return load_index_data()
 
-@st.cache_data(show_spinner="Загружаем бенчмарк IMOEX…")
-def load_benchmark(sy, ey):
-    returns = get_benchmark_returns(sy - 1, ey + 1)
+
+@st.cache_data(show_spinner="Загружаем бенчмарк…")
+def load_benchmark(sy, ey, ticker):
+    returns = get_benchmark(ticker, sy - 1, ey + 1)
     return None if returns.empty else returns
-
-df_index = load_data()
-
-
-def run_one(name, params: StrategyParams):
-    """Один прогон бэктеста для именованной стратегии."""
-    return name, run_backtest(
-        df_index,
-        params,
-        benchmark_returns=load_benchmark(params.start_year, params.end_year),
-        risk_free_rates=get_risk_free_rates(),
-    )
 
 
 def card(label, value, suffix="", css="neutral"):
@@ -69,8 +62,11 @@ def card(label, value, suffix="", css="neutral"):
 def color(v): return "positive" if v >= 0 else "negative"
 
 
+df_index = load_data()
+
+
 # ════════════════════════════════════════════════════════════════
-# САЙДБАР — выбор режима
+# САЙДБАР — общие параметры (режим + бенчмарк)
 # ════════════════════════════════════════════════════════════════
 
 with st.sidebar:
@@ -82,9 +78,24 @@ with st.sidebar:
     )
     st.divider()
 
+    st.subheader("📊 Бенчмарк")
+    benchmark_ticker = st.radio(
+        "Сравнивать с:",
+        ["IMOEX", "MCFTR"],
+        index=0,
+        format_func=lambda x: "IMOEX (ценовой)" if x == "IMOEX"
+                               else "MCFTR (полная доходность)",
+        help=(
+            "IMOEX — ценовой индекс, дивиденды не включает.\n"
+            "MCFTR — индекс полной доходности с реинвестированием дивидендов. "
+            "Методологически корректнее для сравнения с дивидендной стратегией."
+        ),
+    )
+    st.divider()
+
 
 # ════════════════════════════════════════════════════════════════
-# РЕЖИМ 1: ИССЛЕДОВАНИЕ — настройка параметров
+# РЕЖИМ 1: ИССЛЕДОВАНИЕ
 # ════════════════════════════════════════════════════════════════
 
 if mode == "🔬 Исследование":
@@ -120,22 +131,27 @@ if mode == "🔬 Исследование":
 
     @st.cache_data(show_spinner="Считаем бэктест…")
     def cached_backtest(n_dogs, start_year, end_year, min_yield, max_yield,
-                        min_weight, commission, low5_mode):
+                        min_weight, commission, low5_mode, benchmark_ticker):
         params = StrategyParams(
-            start_year=start_year, end_year=end_year,
-            n_dogs=n_dogs, commission=commission,
-            min_div_yield=min_yield, max_div_yield=max_yield,
-            min_index_weight=min_weight,
-            low5_mode=low5_mode, low5_n_first=n_dogs,
+            start_year       = start_year,
+            end_year         = end_year,
+            n_dogs           = n_dogs,
+            commission       = commission,
+            min_div_yield    = min_yield,
+            max_div_yield    = max_yield,
+            min_index_weight = min_weight,
+            low5_mode        = low5_mode,
+            low5_n_first     = n_dogs,
         )
         return run_backtest(
-            df_index, params,
-            benchmark_returns=load_benchmark(start_year, end_year),
-            risk_free_rates=get_risk_free_rates(),
+            df_index,
+            params,
+            benchmark_returns = load_benchmark(start_year, end_year, benchmark_ticker),
+            risk_free_rates   = get_risk_free_rates(),
         )
 
     result = cached_backtest(n_dogs, start_year, end_year, min_yield, max_yield,
-                             min_weight, commission, low5_mode)
+                             min_weight, commission, low5_mode, benchmark_ticker)
 
     if not result.annual:
         st.warning("Нет данных для выбранных параметров. Измените фильтры.")
@@ -144,15 +160,17 @@ if mode == "🔬 Исследование":
     m = result.metrics
     final_capital = initial_capital * result.equity_curve.iloc[-1]
 
+    bench_label = "IMOEX" if benchmark_ticker == "IMOEX" else "MCFTR (полная доходность)"
+
     st.title("🐕 Собаки Доу — MOEX")
     st.caption(
-        "Стратегия: каждый год покупаем N акций из индекса MOEX с наибольшей "
-        "дивидендной доходностью, держим год, ребалансируемся. "
-        "Бенчмарк — IMOEX."
+        f"Стратегия: каждый год покупаем N акций из индекса MOEX с наибольшей "
+        f"дивидендной доходностью, держим год, ребалансируемся. "
+        f"Бенчмарк — {bench_label}."
     )
     st.divider()
 
-    # Карточки метрик
+    # ─── Карточки метрик ──────────────────────────────────────
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1: card("Итоговый капитал", f"₽{final_capital:,.0f}")
     with c2: card("Полная доходность", f"{m['total_return']*100:.1f}", "%", color(m['total_return']))
@@ -172,8 +190,9 @@ if mode == "🔬 Исследование":
 
     st.divider()
 
-    # Графики
+    # ─── Графики ──────────────────────────────────────────────
     left, right = st.columns([2, 1])
+
     with left:
         st.subheader("Кривая капитала")
         eq = result.equity_curve * initial_capital
@@ -190,7 +209,7 @@ if mode == "🔬 Исследование":
             if shared:
                 fig.add_trace(go.Scatter(
                     x=shared, y=[bench_eq[y] for y in shared],
-                    name="IMOEX",
+                    name=benchmark_ticker,
                     line=dict(color="#93c5fd", width=2, dash="dash"),
                 ))
         fig.update_layout(
@@ -217,7 +236,6 @@ if mode == "🔬 Исследование":
             text=[f"{r:+.1f}%" for r in rets],
             textposition="outside",
         ))
-
         if result.benchmark_curve is not None:
             bench_rets_by_year = result.benchmark_curve.pct_change().dropna()
             bench_vals = [
@@ -226,14 +244,13 @@ if mode == "🔬 Исследование":
                 for y in years_list
             ]
             fig2.add_trace(go.Bar(
-                name="IMOEX",
+                name=benchmark_ticker,
                 x=years_list,
                 y=bench_vals,
                 marker_color="#93c5fd",
                 text=[f"{v:+.1f}%" if v is not None else "" for v in bench_vals],
                 textposition="outside",
             ))
-
         fig2.add_hline(y=0, line_dash="dot", line_color="gray")
         fig2.update_layout(
             template="plotly_dark", height=340,
@@ -244,7 +261,7 @@ if mode == "🔬 Исследование":
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-    # График ставки ЦБ
+    # ─── График ставки ЦБ ─────────────────────────────────────
     st.subheader("📈 Ключевая ставка ЦБ — Reality Check")
     rf = result.rf_curve
     fig_rf = go.Figure()
@@ -273,7 +290,7 @@ if mode == "🔬 Исследование":
     fig_rf.add_hline(
         y=float(m.get("avg_rf_rate", 0.07)) * 100,
         line_dash="dash", line_color="rgba(251,191,36,0.4)",
-        annotation_text=f"Средняя ставка {m.get('avg_rf_rate',0)*100:.1f}%",
+        annotation_text=f"Средняя ставка {m.get('avg_rf_rate', 0)*100:.1f}%",
         annotation_position="right",
     )
     fig_rf.update_layout(
@@ -287,7 +304,7 @@ if mode == "🔬 Исследование":
 
     st.divider()
 
-    # Состав портфелей
+    # ─── Состав портфелей ─────────────────────────────────────
     st.subheader("📋 Состав портфелей по годам")
     for yr in result.annual:
         with st.expander(
@@ -323,7 +340,7 @@ if mode == "🔬 Исследование":
 
     st.divider()
 
-    # Сводные метрики
+    # ─── Сводные метрики ──────────────────────────────────────
     st.subheader("📊 Сводные метрики")
     col_left, col_right = st.columns(2)
     with col_left:
@@ -336,29 +353,30 @@ if mode == "🔬 Исследование":
             {"Метрика": "Лучший год",            "Значение": f"{m['best_year']*100:.1f}%"},
             {"Метрика": "Худший год",            "Значение": f"{m['worst_year']*100:.1f}%"},
             {"Метрика": "Ср. дивидендный вклад", "Значение": f"{m['avg_div_contribution']*100:.1f}%"},
-            {"Метрика": "Ср. ставка ЦБ (MAR)",  "Значение": f"{m.get('avg_rf_rate',0)*100:.1f}%"},
+            {"Метрика": "Ср. ставка ЦБ (MAR)",  "Значение": f"{m.get('avg_rf_rate', 0)*100:.1f}%"},
         ]), use_container_width=True, hide_index=True)
     with col_right:
         st.markdown("**Метрики качества**")
         rows = [
-            {"Метрика": "Sharpe Ratio",   "Значение": f"{m['sharpe']:.3f}"},
-            {"Метрика": "Sortino Ratio",  "Значение": f"{m['sortino']:.3f}"},
-            {"Метрика": "Calmar Ratio",   "Значение": f"{m['calmar']:.3f}"},
-            {"Метрика": "Omega Ratio",    "Значение": f"{m['omega']:.3f}"},
-            {"Метрика": "Win Rate",       "Значение": f"{m['win_rate']*100:.0f}%"},
+            {"Метрика": "Sharpe Ratio",  "Значение": f"{m['sharpe']:.3f}"},
+            {"Метрика": "Sortino Ratio", "Значение": f"{m['sortino']:.3f}"},
+            {"Метрика": "Calmar Ratio",  "Значение": f"{m['calmar']:.3f}"},
+            {"Метрика": "Omega Ratio",   "Значение": f"{m['omega']:.3f}"},
+            {"Метрика": "Win Rate",      "Значение": f"{m['win_rate']*100:.0f}%"},
         ]
-        if "batting_avg" in m: rows.append({"Метрика": "Batting Average", "Значение": f"{m['batting_avg']*100:.0f}%"})
-        if "alpha" in m:       rows.append({"Метрика": "Alpha (годовая)", "Значение": f"{m['alpha']*100:.1f}%"})
-        if "beta" in m:        rows.append({"Метрика": "Beta",            "Значение": f"{m['beta']:.3f}"})
-        if "info_ratio" in m:  rows.append({"Метрика": "Information Ratio", "Значение": f"{m['info_ratio']:.3f}"})
-        if "up_capture" in m:  rows.append({"Метрика": "Upside Capture",  "Значение": f"{m['up_capture']*100:.0f}%"})
-        if "down_capture" in m:rows.append({"Метрика": "Downside Capture","Значение": f"{m['down_capture']*100:.0f}%"})
+        if "batting_avg" in m: rows.append({"Метрика": "Batting Average",   "Значение": f"{m['batting_avg']*100:.0f}%"})
+        if "alpha"       in m: rows.append({"Метрика": "Alpha (годовая)",   "Значение": f"{m['alpha']*100:.1f}%"})
+        if "beta"        in m: rows.append({"Метрика": "Beta",              "Значение": f"{m['beta']:.3f}"})
+        if "info_ratio"  in m: rows.append({"Метрика": "Information Ratio", "Значение": f"{m['info_ratio']:.3f}"})
+        if "up_capture"  in m: rows.append({"Метрика": "Upside Capture",    "Значение": f"{m['up_capture']*100:.0f}%"})
+        if "down_capture"in m: rows.append({"Метрика": "Downside Capture",  "Значение": f"{m['down_capture']*100:.0f}%"})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     st.divider()
     st.caption(
-        "Данные: IMOEX (состав индекса) + дивиденды. Цены = закрытие на конец года. "
-        "Sharpe и Sortino — относительно ключевой ставки ЦБ РФ."
+        f"Данные: IMOEX (состав индекса) + дивиденды. Цены = закрытие на конец года. "
+        f"Бенчмарк: {bench_label}. "
+        f"Sharpe и Sortino — относительно ключевой ставки ЦБ РФ."
     )
 
 
@@ -367,10 +385,12 @@ if mode == "🔬 Исследование":
 # ════════════════════════════════════════════════════════════════
 
 else:
+    bench_label = "IMOEX" if benchmark_ticker == "IMOEX" else "MCFTR (полная доходность)"
+
     st.title("📊 Сравнение стратегий — Dogs of MOEX")
     st.caption(
-        "Сравнение классической стратегии Dogs of the Dow с тремя модификациями "
-        "на периоде 2019–2025. Период включает COVID (2020), кризис 2022 года и восстановление."
+        f"Сравнение классической стратегии Dogs of the Dow с тремя модификациями "
+        f"на периоде 2019–2025. Бенчмарк: {bench_label}."
     )
 
     SY, EY, CAP = 2019, 2025, 1_000_000
@@ -402,14 +422,18 @@ else:
     ]
 
     @st.cache_data(show_spinner="Считаем 4 стратегии…")
-    def run_all_scenarios():
+    def run_all_scenarios(benchmark_ticker):
         results = {}
         for name, params, _ in SCENARIOS:
-            _, r = run_one(name, params)
-            results[name] = r
+            bench = load_benchmark(params.start_year, params.end_year, benchmark_ticker)
+            results[name] = run_backtest(
+                df_index, params,
+                benchmark_returns=bench,
+                risk_free_rates=get_risk_free_rates(),
+            )
         return results
 
-    results = run_all_scenarios()
+    results = run_all_scenarios(benchmark_ticker)
 
     COLORS = {
         "Классика":              "#93c5fd",
@@ -423,17 +447,16 @@ else:
     cols = st.columns(4)
     for i, (name, _, desc) in enumerate(SCENARIOS):
         with cols[i]:
-            r = results[name]
-            mr = r.metrics
+            mr = results[name].metrics
             color_dot = COLORS[name]
             st.markdown(f"""
             <div style="background:#1e2130;padding:14px;border-radius:10px;border-left:4px solid {color_dot}">
               <div style="font-weight:700;font-size:15px;margin-bottom:6px;color:{color_dot}">● {name}</div>
               <div style="font-size:12px;color:#9ca3af;line-height:1.4">{desc}</div>
               <div style="margin-top:10px;font-size:13px;color:#e5e7eb">
-              <span style="color:#9ca3af">CAGR:</span> <b style="color:#34d399">{mr['cagr']*100:.1f}%</b> ·
-              <span style="color:#9ca3af">DD:</span> <b style="color:#f87171">{mr['max_drawdown']*100:.1f}%</b>
-            </div>
+                <span style="color:#9ca3af">CAGR:</span> <b style="color:#34d399">{mr['cagr']*100:.1f}%</b> ·
+                <span style="color:#9ca3af">DD:</span> <b style="color:#f87171">{mr['max_drawdown']*100:.1f}%</b>
+              </div>
             </div>""", unsafe_allow_html=True)
 
     st.divider()
@@ -443,26 +466,26 @@ else:
 
     metric_keys = [
         ("Полная доходность", "total_return", "pct"),
-        ("CAGR", "cagr", "pct"),
-        ("Волатильность", "volatility", "pct"),
-        ("Max Drawdown", "max_drawdown", "pct"),
-        ("Sharpe", "sharpe", "num"),
-        ("Sortino", "sortino", "num"),
-        ("Calmar", "calmar", "num"),
-        ("Omega", "omega", "num"),
-        ("Win Rate", "win_rate", "pct"),
-        ("Batting Avg", "batting_avg", "pct"),
-        ("Alpha (год)", "alpha", "pct"),
-        ("Beta", "beta", "num"),
-        ("Info Ratio", "info_ratio", "num"),
-        ("Upside Capture", "up_capture", "pct"),
-        ("Downside Capture", "down_capture", "pct"),
-        ("Лучший год", "best_year", "pct"),
-        ("Худший год", "worst_year", "pct"),
-        ("Ср. див. вклад", "avg_div_contribution", "pct"),
+        ("CAGR",              "cagr",         "pct"),
+        ("Волатильность",     "volatility",   "pct"),
+        ("Max Drawdown",      "max_drawdown", "pct"),
+        ("Sharpe",            "sharpe",       "num"),
+        ("Sortino",           "sortino",      "num"),
+        ("Calmar",            "calmar",       "num"),
+        ("Omega",             "omega",        "num"),
+        ("Win Rate",          "win_rate",     "pct"),
+        ("Batting Avg",       "batting_avg",  "pct"),
+        ("Alpha (год)",       "alpha",        "pct_signed"),
+        ("Beta",              "beta",         "num"),
+        ("Info Ratio",        "info_ratio",   "num"),
+        ("Upside Capture",    "up_capture",   "pct"),
+        ("Downside Capture",  "down_capture", "pct"),
+        ("Лучший год",        "best_year",    "pct"),
+        ("Худший год",        "worst_year",   "pct"),
+        ("Ср. див. вклад",    "avg_div_contribution", "pct"),
     ]
 
-    table_data = {"Метрика": [m_label for m_label, _, _ in metric_keys]}
+    table_data = {"Метрика": [lbl for lbl, _, _ in metric_keys]}
     for name, _, _ in SCENARIOS:
         mt = results[name].metrics
         col_data = []
@@ -470,14 +493,18 @@ else:
             v = mt.get(key)
             if v is None:
                 col_data.append("—")
+            elif fmt == "pct_signed":
+                col_data.append(f"{v*100:+.1f}%")
             elif fmt == "pct":
-                col_data.append(f"{v*100:+.1f}%" if key in ("alpha",) else f"{v*100:.1f}%")
+                col_data.append(f"{v*100:.1f}%")
             else:
                 col_data.append(f"{v:.3f}")
         table_data[name] = col_data
 
-    df_metrics = pd.DataFrame(table_data)
-    st.dataframe(df_metrics, use_container_width=True, hide_index=True, height=680)
+    st.dataframe(
+        pd.DataFrame(table_data),
+        use_container_width=True, hide_index=True, height=680,
+    )
 
     st.divider()
 
@@ -501,13 +528,12 @@ else:
             line=dict(color=COLORS[name], width=2.5),
             mode="lines+markers", marker=dict(size=6),
         ))
-    # IMOEX
     bc = results["Классика"].benchmark_curve
     if bc is not None:
         bench_eq = bc * CAP
         fig_eq.add_trace(go.Scatter(
             x=list(bench_eq.index), y=list(bench_eq.values),
-            name="IMOEX (бенчмарк)",
+            name=f"{benchmark_ticker} (бенчмарк)",
             line=dict(color="#9ca3af", width=2, dash="dash"),
         ))
     fig_eq.update_layout(
@@ -520,7 +546,7 @@ else:
     )
     st.plotly_chart(fig_eq, use_container_width=True)
 
-    # ─── Доходность по годам ───────────────────────────────────
+    # ─── Годовая доходность ────────────────────────────────────
     st.subheader("📊 Годовая доходность")
     fig_y = go.Figure()
     for name, _, _ in SCENARIOS:
@@ -542,18 +568,17 @@ else:
     )
     st.plotly_chart(fig_y, use_container_width=True)
 
-    # ─── Кризис 2022 — фокус ───────────────────────────────────
+    # ─── Кризис 2022 ───────────────────────────────────────────
     st.subheader("🔻 Поведение в кризис 2022")
     cr_cols = st.columns(4)
     for i, (name, _, _) in enumerate(SCENARIOS):
         with cr_cols[i]:
-            r = results[name]
-            yr_2022 = next((a for a in r.annual if a.year == 2022), None)
+            yr_2022 = next((a for a in results[name].annual if a.year == 2022), None)
             if yr_2022:
-                ret = yr_2022.portfolio_return * 100
+                ret   = yr_2022.portfolio_return * 100
                 price = yr_2022.price_return * 100
-                div = yr_2022.div_return * 100
-                css = "positive" if ret >= 0 else "negative"
+                div   = yr_2022.div_return * 100
+                css   = "positive" if ret >= 0 else "negative"
                 st.markdown(f"""
                 <div style="background:#1e2130;padding:14px;border-radius:10px;border-left:4px solid {COLORS[name]}">
                   <div style="font-weight:700;color:{COLORS[name]};margin-bottom:8px">{name}</div>
@@ -569,19 +594,19 @@ else:
     st.subheader("⬇️ Экспорт результатов")
 
     @st.cache_data(show_spinner="Готовим Excel…")
-    def build_excel():
+    def build_excel(benchmark_ticker):
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
             wb = writer.book
-            fmt_pct = wb.add_format({"num_format": "0.0%"})
-            fmt_num = wb.add_format({"num_format": "0.000"})
-            fmt_money = wb.add_format({"num_format": "#,##0"})
+            fmt_pct    = wb.add_format({"num_format": "0.0%"})
+            fmt_num    = wb.add_format({"num_format": "0.000"})
+            fmt_money  = wb.add_format({"num_format": "#,##0"})
             fmt_header = wb.add_format({
                 "bold": True, "bg_color": "#2E5FA3", "font_color": "white",
                 "border": 1, "align": "center",
             })
 
-            # ── Лист 1: Сводная ──────────────────────────────
+            # Лист 1: Сводная
             df_sum = pd.DataFrame({"Метрика": [lbl for lbl, _, _ in metric_keys]})
             for name, _, _ in SCENARIOS:
                 mt = results[name].metrics
@@ -592,28 +617,21 @@ else:
             ws.set_column(1, len(SCENARIOS), 18)
             for c in range(len(SCENARIOS) + 1):
                 ws.write(0, c, df_sum.columns[c], fmt_header)
-            # Форматирование процентов/чисел
             for ri, (_, _, fmt_type) in enumerate(metric_keys, start=1):
                 for ci in range(1, len(SCENARIOS) + 1):
-                    val = df_sum.iloc[ri-1, ci]
+                    val = df_sum.iloc[ri - 1, ci]
                     if pd.notna(val):
-                        if fmt_type == "pct":
-                            ws.write(ri, ci, val, fmt_pct)
-                        else:
-                            ws.write(ri, ci, val, fmt_num)
+                        ws.write(ri, ci, val, fmt_pct if "pct" in fmt_type else fmt_num)
 
-            # ── Лист 2: Доходность по годам ──────────────────
+            # Лист 2: Доходность по годам
             years_set = sorted({a.year for r in results.values() for a in r.annual})
             df_y = pd.DataFrame({"Год": years_set})
             for name, _, _ in SCENARIOS:
                 yr_map = {a.year: a.portfolio_return for a in results[name].annual}
                 df_y[name] = [yr_map.get(y) for y in years_set]
-            # IMOEX
-            bc = results["Классика"].benchmark_curve
             if bc is not None:
                 br = bc.pct_change().dropna()
-                df_y["IMOEX"] = [br.get(y) for y in years_set]
-            # Ставка ЦБ
+                df_y[benchmark_ticker] = [br.get(y) for y in years_set]
             rf_map = {a.year: a.rf_rate for a in results["Классика"].annual}
             df_y["Ставка ЦБ"] = [rf_map.get(y) for y in years_set]
             df_y.to_excel(writer, sheet_name="Доходность по годам", index=False)
@@ -623,15 +641,15 @@ else:
             for c in range(df_y.shape[1]):
                 ws.write(0, c, df_y.columns[c], fmt_header)
 
-            # ── Лист 3: Кривые капитала ──────────────────────
+            # Лист 3: Кривые капитала
             all_yrs = sorted({y for r in results.values() for y in r.equity_curve.index})
             df_eq = pd.DataFrame({"Год": all_yrs})
             for name, _, _ in SCENARIOS:
                 ec = results[name].equity_curve * CAP
                 df_eq[name] = [ec.get(y) for y in all_yrs]
             if bc is not None:
-                bench_eq = bc * CAP
-                df_eq["IMOEX"] = [bench_eq.get(y) for y in all_yrs]
+                bench_eq2 = bc * CAP
+                df_eq[benchmark_ticker] = [bench_eq2.get(y) for y in all_yrs]
             df_eq.to_excel(writer, sheet_name="Кривые капитала", index=False)
             ws = writer.sheets["Кривые капитала"]
             ws.set_column(0, 0, 8)
@@ -639,18 +657,18 @@ else:
             for c in range(df_eq.shape[1]):
                 ws.write(0, c, df_eq.columns[c], fmt_header)
 
-            # ── Лист 4: Кризис 2022 ──────────────────────────
+            # Лист 4: Кризис 2022
             crisis = []
             for name, _, _ in SCENARIOS:
                 y22 = next((a for a in results[name].annual if a.year == 2022), None)
                 if y22:
                     crisis.append({
-                        "Стратегия": name,
-                        "Итого 2022":   y22.portfolio_return,
-                        "Вклад цены":   y22.price_return,
-                        "Вклад дивов":  y22.div_return,
+                        "Стратегия":      name,
+                        "Итого 2022":     y22.portfolio_return,
+                        "Вклад цены":     y22.price_return,
+                        "Вклад дивов":    y22.div_return,
                         "Акций в портф.": y22.n_stocks,
-                        "Ставка ЦБ":    y22.rf_rate,
+                        "Ставка ЦБ":      y22.rf_rate,
                     })
             df_cr = pd.DataFrame(crisis)
             df_cr.to_excel(writer, sheet_name="Кризис 2022", index=False)
@@ -660,69 +678,69 @@ else:
             for c in range(df_cr.shape[1]):
                 ws.write(0, c, df_cr.columns[c], fmt_header)
 
-            # ── Лист 5: Состав портфелей ─────────────────────
+            # Лист 5: Состав портфелей
             rows = []
             for name, _, _ in SCENARIOS:
                 for a in results[name].annual:
                     for _, srow in a.stocks.iterrows():
                         rows.append({
-                            "Стратегия":      name,
-                            "Год":            a.year,
-                            "Тикер":          srow["ticker"],
-                            "Цена покупки":   srow["price_buy"],
-                            "Цена продажи":   srow["price_sell"],
-                            "Дивиденд, ₽":    srow["dividend_paid"],
-                            "Дивдох. (отбор)":srow["prev_div_yield"],
-                            "Рост цены":      srow["price_ret"],
-                            "Дивдох. факт":   srow["div_ret"],
-                            "Итого":          srow["total_ret"],
+                            "Стратегия":       name,
+                            "Год":             a.year,
+                            "Тикер":           srow["ticker"],
+                            "Цена покупки":    srow["price_buy"],
+                            "Цена продажи":    srow["price_sell"],
+                            "Дивиденд, ₽":     srow["dividend_paid"],
+                            "Дивдох. (отбор)": srow["prev_div_yield"],
+                            "Рост цены":       srow["price_ret"],
+                            "Дивдох. факт":    srow["div_ret"],
+                            "Итого":           srow["total_ret"],
                         })
             df_st = pd.DataFrame(rows)
             df_st.to_excel(writer, sheet_name="Состав портфелей", index=False)
             ws = writer.sheets["Состав портфелей"]
-            ws.set_column(0, 0, 22)
-            ws.set_column(1, 1, 8)
-            ws.set_column(2, 2, 10)
-            ws.set_column(3, 5, 14)
+            ws.set_column(0, 0, 22); ws.set_column(1, 1, 8)
+            ws.set_column(2, 2, 10); ws.set_column(3, 5, 14)
             ws.set_column(6, 9, 14, fmt_pct)
             for c in range(df_st.shape[1]):
                 ws.write(0, c, df_st.columns[c], fmt_header)
 
-            # ── Лист 6: Параметры ────────────────────────────
+            # Лист 6: Параметры
             params_rows = []
             for name, params, desc in SCENARIOS:
                 params_rows.append({
-                    "Стратегия":          name,
-                    "Описание":           desc,
-                    "Период":             f"{params.start_year}–{params.end_year}",
-                    "Собак":              params.n_dogs,
-                    "Мин. дивдох.":       params.min_div_yield,
-                    "Макс. дивдох.":      params.max_div_yield,
-                    "Мин. вес":           params.min_index_weight,
-                    "Комиссия":           params.commission,
-                    "Low-5":              "Да" if params.low5_mode else "Нет",
+                    "Стратегия":    name,
+                    "Описание":     desc,
+                    "Период":       f"{params.start_year}–{params.end_year}",
+                    "Собак":        params.n_dogs,
+                    "Мин. дивдох.": params.min_div_yield,
+                    "Макс. дивдох.":params.max_div_yield,
+                    "Мин. вес":     params.min_index_weight,
+                    "Комиссия":     params.commission,
+                    "Low-5":        "Да" if params.low5_mode else "Нет",
+                    "Бенчмарк":     benchmark_ticker,
                 })
             df_p = pd.DataFrame(params_rows)
             df_p.to_excel(writer, sheet_name="Параметры", index=False)
             ws = writer.sheets["Параметры"]
-            ws.set_column(0, 0, 22); ws.set_column(1, 1, 60); ws.set_column(2, 2, 12)
-            ws.set_column(3, 3, 8); ws.set_column(4, 7, 14, fmt_pct); ws.set_column(8, 8, 8)
+            ws.set_column(0, 0, 22); ws.set_column(1, 1, 60)
+            ws.set_column(2, 2, 12); ws.set_column(3, 3, 8)
+            ws.set_column(4, 7, 14, fmt_pct); ws.set_column(8, 9, 10)
             for c in range(df_p.shape[1]):
                 ws.write(0, c, df_p.columns[c], fmt_header)
 
         return buf.getvalue()
 
-    excel_bytes = build_excel()
+    excel_bytes = build_excel(benchmark_ticker)
     st.download_button(
         label="⬇️ Скачать сравнение в Excel",
         data=excel_bytes,
-        file_name=f"dogs_moex_comparison_{SY}-{EY}.xlsx",
+        file_name=f"dogs_moex_{benchmark_ticker}_{SY}-{EY}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
         use_container_width=True,
     )
 
     st.caption(
-        "Файл содержит листы: Сводная, Доходность по годам, Кривые капитала, "
-        "Кризис 2022, Состав портфелей, Параметры."
+        f"Файл содержит листы: Сводная, Доходность по годам, Кривые капитала, "
+        f"Кризис 2022, Состав портфелей, Параметры. Бенчмарк: {bench_label}."
     )
